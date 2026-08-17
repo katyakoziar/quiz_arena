@@ -1,0 +1,511 @@
+const { useState, useEffect, useRef, useCallback } = React;
+const socket = io();
+
+const INK = "#0F0A26";
+const INK_2 = "#1C1140";
+const CARD = "#FFFFFF";
+const ACCENT = "#FFC53D";
+
+const OPTS = [
+  { key: "A", shape: "triangle", bg: "#E8412C" },
+  { key: "B", shape: "diamond", bg: "#1368CE" },
+  { key: "C", shape: "circle", bg: "#D89E00" },
+  { key: "D", shape: "square", bg: "#7B2FF7" },
+];
+
+function newQuestion() {
+  return { text: "", options: ["", "", "", ""], correct: 0, duration: 20 };
+}
+
+/* ---------------- visual bits ---------------- */
+function ShapeIcon({ shape, color = "#fff", size = 22 }) {
+  if (shape === "circle")
+    return <div style={{ width: size, height: size, borderRadius: "50%", background: color, flexShrink: 0 }} />;
+  if (shape === "square")
+    return <div style={{ width: size, height: size, borderRadius: 6, background: color, flexShrink: 0 }} />;
+  if (shape === "diamond")
+    return <div style={{ width: size * 0.78, height: size * 0.78, background: color, transform: "rotate(45deg)", borderRadius: 3, flexShrink: 0 }} />;
+  return <div style={{ width: 0, height: 0, borderLeft: `${size / 2}px solid transparent`, borderRight: `${size / 2}px solid transparent`, borderBottom: `${size}px solid ${color}`, flexShrink: 0 }} />;
+}
+
+function MarqueePin({ pin }) {
+  const dots = Array.from({ length: 24 });
+  return (
+    <div style={{ position: "relative", display: "inline-block", padding: "34px 46px" }}>
+      <div style={{ position: "absolute", inset: 0, borderRadius: 22, background: "linear-gradient(135deg,#2a1a55,#160b34)", boxShadow: "0 18px 40px rgba(0,0,0,0.45)" }} />
+      {dots.map((_, i) => {
+        const angle = (i / dots.length) * 360;
+        const rad = (angle * Math.PI) / 180;
+        return (
+          <div key={i} style={{ position: "absolute", left: `calc(50% + ${Math.cos(rad) * 50}%)`, top: `calc(50% + ${Math.sin(rad) * 50}%)`, width: 7, height: 7, borderRadius: "50%", background: ACCENT, transform: "translate(-50%,-50%)", animation: `pinPulse 1.6s ease-in-out ${(i % 6) * 0.12}s infinite` }} />
+        );
+      })}
+      <div style={{ position: "relative", fontFamily: "'Baloo 2', sans-serif", fontWeight: 800, fontSize: 52, letterSpacing: 8, color: "#fff", textShadow: "0 0 24px rgba(255,197,61,0.35)" }}>
+        {pin}
+      </div>
+    </div>
+  );
+}
+
+function Podium({ top3 }) {
+  const order = [1, 0, 2];
+  const heights = [128, 168, 100];
+  const medalColor = ["#C7CDD6", "#FFC53D", "#E39A5E"];
+  return (
+    <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "center", gap: 14, marginTop: 8 }}>
+      {order.map((idx, i) => {
+        const p = top3[idx];
+        if (!p) return <div key={i} style={{ width: 110 }} />;
+        return (
+          <div key={p.id} style={{ display: "flex", flexDirection: "column", alignItems: "center", width: 110 }}>
+            <div style={{ fontSize: idx === 0 ? 26 : 20, marginBottom: 4 }}>{idx === 0 ? "👑" : "🎖️"}</div>
+            <div style={{ fontFamily: "'Baloo 2', sans-serif", fontWeight: 700, color: "#fff", fontSize: 14, marginBottom: 4, textAlign: "center", maxWidth: 105, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+            <div style={{ fontSize: 13, color: "#FFC53D", fontWeight: 700, marginBottom: 8 }}>{p.score} б.</div>
+            <div style={{ width: "100%", height: heights[i], borderRadius: "14px 14px 0 0", background: `linear-gradient(180deg, ${medalColor[idx]}, ${medalColor[idx]}99)`, display: "flex", alignItems: "flex-start", justifyContent: "center", paddingTop: 10, fontFamily: "'Baloo 2', sans-serif", fontWeight: 800, fontSize: 24, color: "#1C1140" }}>
+              {idx + 1}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function TimerRing({ fraction, seconds }) {
+  const deg = Math.max(0, Math.min(1, fraction)) * 360;
+  const color = fraction < 0.2 ? "#E8412C" : ACCENT;
+  return (
+    <div style={{ width: 84, height: 84, borderRadius: "50%", background: `conic-gradient(${color} ${deg}deg, rgba(255,255,255,0.12) ${deg}deg)`, display: "flex", alignItems: "center", justifyContent: "center", transition: "background 0.15s linear", flexShrink: 0 }}>
+      <div style={{ width: 68, height: 68, borderRadius: "50%", background: INK_2, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Baloo 2', sans-serif", fontWeight: 800, fontSize: 26, color: "#fff" }}>
+        {Math.ceil(Math.max(0, seconds))}
+      </div>
+    </div>
+  );
+}
+
+function Button({ children, onClick, disabled, variant = "primary", style, ...rest }) {
+  const base = { fontFamily: "'Baloo 2', sans-serif", fontWeight: 700, fontSize: 18, borderRadius: 14, padding: "14px 26px", border: "none", cursor: disabled ? "not-allowed" : "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 10, transition: "transform 0.12s ease, filter 0.12s ease", opacity: disabled ? 0.5 : 1 };
+  const variants = {
+    primary: { background: ACCENT, color: "#1C1140" },
+    ghost: { background: "rgba(255,255,255,0.08)", color: "#fff", border: "1px solid rgba(255,255,255,0.18)" },
+  };
+  return (
+    <button className="qa-btn" onClick={disabled ? undefined : onClick} style={{ ...base, ...variants[variant], ...style }} {...rest}>
+      {children}
+    </button>
+  );
+}
+
+function TextField({ value, onChange, placeholder, style, ...rest }) {
+  return (
+    <input value={value} onChange={onChange} placeholder={placeholder} style={{ fontFamily: "'Inter', sans-serif", fontWeight: 600, fontSize: 16, borderRadius: 12, border: "2px solid #E4E1F0", padding: "13px 16px", outline: "none", width: "100%", boxSizing: "border-box", color: INK, ...style }} {...rest} />
+  );
+}
+
+function Screen({ children, dark = true }) {
+  return (
+    <div style={{ minHeight: 560, width: "100%", maxWidth: 640, borderRadius: 24, background: dark ? "radial-gradient(circle at 20% 0%, #2a1a55 0%, #120a2e 55%, #0b0620 100%)" : "#F4F2FB", fontFamily: "'Inter', sans-serif", padding: 28, boxSizing: "border-box", display: "flex", flexDirection: "column", position: "relative", overflow: "hidden", boxShadow: "0 30px 80px rgba(0,0,0,0.5)" }}>
+      {children}
+    </div>
+  );
+}
+
+function HeaderBar({ left, right }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+      <span style={{ color: "#B9AFDA", fontWeight: 700, fontSize: 13 }}>{left}</span>
+      <span style={{ color: "#B9AFDA", fontWeight: 700, fontSize: 13 }}>{right}</span>
+    </div>
+  );
+}
+
+function Leaderboard({ players, highlightId, compact }) {
+  const list = compact ? players : players.slice(0, 8);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: compact ? undefined : 1, justifyContent: "center", maxWidth: 460, margin: "0 auto", width: "100%" }}>
+      {list.length === 0 && <p style={{ color: "#7A70A0", textAlign: "center" }}>Поки немає результатів</p>}
+      {list.map((p, i) => (
+        <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 12, background: p.id === highlightId ? "rgba(255,197,61,0.16)" : "rgba(255,255,255,0.06)", border: p.id === highlightId ? "1px solid rgba(255,197,61,0.5)" : "1px solid transparent", borderRadius: 12, padding: "10px 16px" }}>
+          <span style={{ width: 26, height: 26, borderRadius: "50%", background: i < 3 ? ACCENT : "rgba(255,255,255,0.12)", color: i < 3 ? "#1C1140" : "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 13, fontFamily: "'Baloo 2', sans-serif", flexShrink: 0 }}>{i + 1}</span>
+          <span style={{ flex: 1, color: "#fff", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+          <span style={{ color: ACCENT, fontWeight: 800, fontFamily: "'Baloo 2', sans-serif" }}>{p.score}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function LoadingPane({ text = "Завантаження…" }) {
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ fontSize: 28 }} className="qa-fade">⏳</div>
+      <p style={{ color: "#B9AFDA", marginTop: 12 }}>{text}</p>
+    </div>
+  );
+}
+
+function ErrorPane({ msg, onReset }) {
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", textAlign: "center" }}>
+      <div style={{ fontSize: 30 }}>❌</div>
+      <p style={{ color: "#fff", marginTop: 14, maxWidth: 320 }}>{msg}</p>
+      <Button onClick={onReset} style={{ marginTop: 18 }}>На головну</Button>
+    </div>
+  );
+}
+
+/* ---------------- App ---------------- */
+function App() {
+  const [role, setRole] = useState(null);
+  const [pin, setPin] = useState(null);
+  const [state, setState] = useState(null); // server-pushed game state
+  const [connError, setConnError] = useState("");
+  const [now, setNow] = useState(Date.now());
+
+  // host setup
+  const [draft, setDraft] = useState([newQuestion()]);
+  const [creating, setCreating] = useState(false);
+  const [createErr, setCreateErr] = useState("");
+
+  // player join
+  const [pinInput, setPinInput] = useState("");
+  const [nameInput, setNameInput] = useState("");
+  const [joinError, setJoinError] = useState("");
+  const [joining, setJoining] = useState(false);
+  const [playerId, setPlayerId] = useState(null);
+  const [playerName, setPlayerName] = useState("");
+  const [answeredIndex, setAnsweredIndex] = useState(-1);
+  const [lastResult, setLastResult] = useState(null);
+
+  useEffect(() => {
+    function onState(payload) { setState(payload); }
+    function onHostLeft() { setConnError("Ведучий завершив сесію."); }
+    function onDisconnect() { setConnError("Втрачено з'єднання із сервером. Спробуйте оновити сторінку."); }
+    socket.on("state", onState);
+    socket.on("host:left", onHostLeft);
+    socket.on("disconnect", onDisconnect);
+    return () => {
+      socket.off("state", onState);
+      socket.off("host:left", onHostLeft);
+      socket.off("disconnect", onDisconnect);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!state || state.status !== "question") return;
+    const t = setInterval(() => setNow(Date.now()), 200);
+    return () => clearInterval(t);
+  }, [state && state.status, state && state.currentIndex]);
+
+  function resetAll() {
+    setRole(null); setPin(null); setState(null); setConnError("");
+    setDraft([newQuestion()]); setCreateErr("");
+    setPinInput(""); setNameInput(""); setJoinError(""); setJoining(false);
+    setPlayerId(null); setPlayerName(""); setAnsweredIndex(-1); setLastResult(null);
+  }
+
+  /* host actions */
+  function updateQ(i, patch) { setDraft(d => d.map((q, idx) => idx === i ? { ...q, ...patch } : q)); }
+  function updateOpt(i, oi, val) { setDraft(d => d.map((q, idx) => idx === i ? { ...q, options: q.options.map((o, k) => k === oi ? val : o) } : q)); }
+  function addQuestion() { setDraft(d => [...d, newQuestion()]); }
+  function removeQuestion(i) { setDraft(d => d.filter((_, idx) => idx !== i)); }
+  const draftValid = draft.length > 0 && draft.every(q => q.text.trim() && q.options.every(o => o.trim()) && q.duration > 0);
+
+  function createGame() {
+    if (!draftValid || creating) return;
+    setCreating(true); setCreateErr("");
+    socket.emit("host:create", { questions: draft }, (res) => {
+      setCreating(false);
+      if (res && res.error) { setCreateErr(res.error); return; }
+      setRole("host"); setPin(res.pin);
+    });
+  }
+  function startQuiz() { socket.emit("host:start", { pin }); }
+  function endQuestionNow() { socket.emit("host:endQuestion", { pin }); }
+  function nextQuestion() { socket.emit("host:next", { pin }); }
+
+  /* player actions */
+  function joinGame() {
+    setJoinError("");
+    const p = pinInput.trim(); const name = nameInput.trim();
+    if (!/^\d{4,6}$/.test(p)) { setJoinError("Введіть коректний PIN-код (4–6 цифр)."); return; }
+    if (!name) { setJoinError("Введіть нікнейм."); return; }
+    setJoining(true);
+    socket.emit("player:join", { pin: p, name }, (res) => {
+      setJoining(false);
+      if (res && res.error) { setJoinError(res.error); return; }
+      setPlayerId(res.playerId); setPlayerName(name); setPin(res.pin); setRole("player");
+    });
+  }
+  function answer(choiceIdx) {
+    if (!state || state.status !== "question") return;
+    if (answeredIndex === state.currentIndex) return;
+    setAnsweredIndex(state.currentIndex);
+    socket.emit("player:answer", { pin, playerId, choice: choiceIdx }, (res) => {
+      if (res) setLastResult(res);
+    });
+  }
+
+  /* ---------------- render ---------------- */
+  if (!role) {
+    return (
+      <Screen>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", textAlign: "center" }} className="qa-fade">
+          <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+            {OPTS.map(o => <ShapeIcon key={o.key} shape={o.shape} color={o.bg} size={26} />)}
+          </div>
+          <h1 style={{ fontFamily: "'Baloo 2', sans-serif", fontWeight: 800, fontSize: 42, color: "#fff", margin: 0 }}>Quiz Arena</h1>
+          <p style={{ color: "#B9AFDA", marginTop: 8, marginBottom: 40, fontSize: 15 }}>Вікторина в реальному часі — свій сайт, свій сервер</p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14, width: 280 }}>
+            <Button onClick={() => setRole("host-setup")} style={{ padding: "16px 24px" }}>🚀 Створити гру</Button>
+            <Button variant="ghost" onClick={() => setRole("player-join")} style={{ padding: "16px 24px" }}>🔑 Приєднатися до гри</Button>
+          </div>
+        </div>
+      </Screen>
+    );
+  }
+
+  if (role === "host-setup") {
+    return (
+      <Screen dark={false}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+          <h2 style={{ fontFamily: "'Baloo 2', sans-serif", fontSize: 26, color: INK, margin: 0 }}>Створення вікторини</h2>
+          <button onClick={resetAll} style={{ background: "none", border: "none", color: "#8B84AE", cursor: "pointer", fontWeight: 600 }}>← Назад</button>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 16, overflowY: "auto", paddingRight: 4, maxHeight: 420 }}>
+          {draft.map((q, i) => (
+            <div key={i} style={{ background: CARD, borderRadius: 16, padding: 18, boxShadow: "0 2px 10px rgba(30,20,70,0.08)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <span style={{ fontFamily: "'Baloo 2', sans-serif", fontWeight: 700, color: "#7B2FF7" }}>Питання {i + 1}</span>
+                {draft.length > 1 && <button onClick={() => removeQuestion(i)} style={{ background: "none", border: "none", cursor: "pointer", color: "#E8412C" }}>🗑</button>}
+              </div>
+              <TextField value={q.text} onChange={e => updateQ(i, { text: e.target.value })} placeholder="Текст питання" style={{ marginBottom: 10 }} />
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+                {q.options.map((opt, oi) => (
+                  <div key={oi} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <button onClick={() => updateQ(i, { correct: oi })} title="Позначити правильною" style={{ width: 30, height: 30, borderRadius: 8, border: "none", flexShrink: 0, cursor: "pointer", background: OPTS[oi].bg, display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontWeight: 800 }}>
+                      {q.correct === oi ? "✓" : ""}
+                    </button>
+                    <TextField value={opt} onChange={e => updateOpt(i, oi, e.target.value)} placeholder={`Варіант ${OPTS[oi].key}`} />
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 13, color: "#8B84AE", fontWeight: 600 }}>Час на відповідь (сек):</span>
+                <TextField value={q.duration} onChange={e => updateQ(i, { duration: Math.max(5, parseInt(e.target.value) || 0) })} style={{ width: 70, padding: "8px 10px" }} />
+              </div>
+            </div>
+          ))}
+        </div>
+        {createErr && <p style={{ color: "#E8412C", fontWeight: 600, marginTop: 10 }}>{createErr}</p>}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 18 }}>
+          <Button variant="ghost" onClick={addQuestion} style={{ color: INK, background: "#EDE9FB", border: "none" }}>➕ Додати питання</Button>
+          <Button onClick={createGame} disabled={!draftValid || creating}>{creating ? "…" : "▶"} Почати гру</Button>
+        </div>
+      </Screen>
+    );
+  }
+
+  if (role === "player-join") {
+    return (
+      <Screen>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }} className="qa-fade">
+          <div style={{ fontSize: 36, marginBottom: 10 }}>🎮</div>
+          <h2 style={{ fontFamily: "'Baloo 2', sans-serif", color: "#fff", fontSize: 26, marginBottom: 22 }}>Приєднатися до гри</h2>
+          <div style={{ width: 280, display: "flex", flexDirection: "column", gap: 12 }}>
+            <TextField value={pinInput} onChange={e => setPinInput(e.target.value.replace(/\D/g, ""))} placeholder="PIN-код гри" style={{ textAlign: "center", fontSize: 22, letterSpacing: 4, fontFamily: "'Baloo 2', sans-serif" }} />
+            <TextField value={nameInput} onChange={e => setNameInput(e.target.value.slice(0, 20))} placeholder="Ваш нікнейм" />
+            {joinError && <span style={{ color: "#FF8B7A", fontSize: 13, fontWeight: 600 }}>{joinError}</span>}
+            <Button onClick={joinGame} disabled={joining} style={{ marginTop: 6 }}>{joining ? "…" : "🔑"} Приєднатися</Button>
+            <button onClick={resetAll} style={{ background: "none", border: "none", color: "#8B84AE", cursor: "pointer" }}>← Назад</button>
+          </div>
+        </div>
+      </Screen>
+    );
+  }
+
+  if (connError) {
+    return <Screen><ErrorPane msg={connError} onReset={resetAll} /></Screen>;
+  }
+
+  if (!state) {
+    return <Screen><LoadingPane /></Screen>;
+  }
+
+  const players = state.players || [];
+
+  /* ---- HOST live views ---- */
+  if (role === "host") {
+    if (state.status === "lobby") {
+      return (
+        <Screen>
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", textAlign: "center" }} className="qa-fade">
+            <p style={{ color: "#B9AFDA", marginBottom: 4, fontSize: 14, fontWeight: 600 }}>PIN-код гри</p>
+            <MarqueePin pin={pin} />
+            <div style={{ display: "flex", alignItems: "center", gap: 8, color: "#fff", marginTop: 26, marginBottom: 6 }}>
+              <span>👥</span>
+              <span style={{ fontFamily: "'Baloo 2', sans-serif", fontWeight: 700, fontSize: 18 }}>{players.length} гравців приєдналося</span>
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center", maxWidth: 460, marginBottom: 30 }}>
+              {players.map(p => (
+                <span key={p.id} style={{ background: "rgba(255,255,255,0.1)", color: "#fff", padding: "7px 14px", borderRadius: 20, fontSize: 14, fontWeight: 600 }}>{p.name}</span>
+              ))}
+              {players.length === 0 && <span style={{ color: "#7A70A0", fontSize: 14 }}>Очікуємо на гравців…</span>}
+            </div>
+            <Button onClick={startQuiz} disabled={players.length === 0} style={{ padding: "16px 34px", fontSize: 20 }}>▶ Почати вікторину</Button>
+          </div>
+        </Screen>
+      );
+    }
+
+    if (state.status === "question") {
+      const q = state.question;
+      const elapsed = (now - state.questionStartTime) / 1000;
+      const remaining = Math.max(0, q.duration - elapsed);
+      const fraction = remaining / q.duration;
+      const answeredCount = players.filter(p => p.answeredCurrent).length;
+      return (
+        <Screen>
+          <HeaderBar left={`Питання ${state.currentIndex + 1} / ${state.totalQuestions}`} right={`${answeredCount}/${players.length} відповіли`} />
+          <div className="qa-fade" key={state.currentIndex} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+            <TimerRing fraction={fraction} seconds={remaining} />
+            <h2 style={{ fontFamily: "'Baloo 2', sans-serif", color: "#fff", fontSize: 28, textAlign: "center", margin: "22px 0 30px", maxWidth: 560 }}>{q.text}</h2>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, width: "100%", maxWidth: 560 }}>
+              {q.options.map((opt, i) => (
+                <div key={i} style={{ background: OPTS[i].bg, borderRadius: 14, padding: "18px 16px", display: "flex", alignItems: "center", gap: 12, outline: i === q.correct ? "3px solid #FFC53D" : "none" }}>
+                  <ShapeIcon shape={OPTS[i].shape} />
+                  <span style={{ color: "#fff", fontWeight: 700 }}>{opt}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div style={{ display: "flex", justifyContent: "center", marginTop: 10 }}>
+            <Button variant="ghost" onClick={endQuestionNow}>Завершити достроково →</Button>
+          </div>
+        </Screen>
+      );
+    }
+
+    if (state.status === "leaderboard") {
+      const isLast = state.currentIndex + 1 >= state.totalQuestions;
+      return (
+        <Screen>
+          <HeaderBar left={`Після питання ${state.currentIndex + 1}`} right={`${players.length} гравців`} />
+          <Leaderboard players={players} />
+          <div style={{ display: "flex", justifyContent: "center", marginTop: 18 }}>
+            <Button onClick={nextQuestion} style={{ padding: "14px 30px" }}>{isLast ? "🏆 Показати фінальні результати" : "Наступне питання →"}</Button>
+          </div>
+        </Screen>
+      );
+    }
+
+    if (state.status === "final") {
+      const top3 = players.slice(0, 3);
+      return (
+        <Screen>
+          <div className="qa-fade" style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center" }}>
+            <div style={{ fontSize: 34 }}>🏆</div>
+            <h2 style={{ fontFamily: "'Baloo 2', sans-serif", color: "#fff", fontSize: 30, margin: "10px 0 6px" }}>Гру завершено!</h2>
+            <p style={{ color: "#B9AFDA", marginBottom: 10, fontSize: 14 }}>PIN {pin}</p>
+            <Podium top3={top3} />
+            <div style={{ width: "100%", maxWidth: 420, marginTop: 26 }}><Leaderboard players={players} compact /></div>
+            <Button onClick={resetAll} style={{ marginTop: 24 }}>↻ Нова гра</Button>
+          </div>
+        </Screen>
+      );
+    }
+  }
+
+  /* ---- PLAYER live views ---- */
+  if (role === "player") {
+    if (state.status === "lobby") {
+      return (
+        <Screen>
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", textAlign: "center" }} className="qa-fade">
+            <div style={{ width: 76, height: 76, borderRadius: "50%", background: "rgba(255,255,255,0.08)", display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 18, fontSize: 28 }} className="qa-fade">⏳</div>
+            <h2 style={{ fontFamily: "'Baloo 2', sans-serif", color: "#fff", fontSize: 24, margin: 0 }}>Привіт, {playerName}!</h2>
+            <p style={{ color: "#B9AFDA", marginTop: 10 }}>Чекаємо на старт від ведучого…</p>
+          </div>
+        </Screen>
+      );
+    }
+
+    if (state.status === "question") {
+      const q = state.question;
+      const elapsed = (now - state.questionStartTime) / 1000;
+      const remaining = Math.max(0, q.duration - elapsed);
+      const fraction = remaining / q.duration;
+      const alreadyAnswered = answeredIndex === state.currentIndex;
+
+      if (alreadyAnswered) {
+        return (
+          <Screen>
+            <div className="qa-fade" style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", textAlign: "center" }}>
+              {lastResult ? (
+                <>
+                  <div style={{ width: 92, height: 92, borderRadius: "50%", background: lastResult.correct ? "rgba(58,201,120,0.15)" : "rgba(232,65,44,0.15)", display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 18, fontSize: 40 }}>
+                    {lastResult.correct ? "✅" : "❌"}
+                  </div>
+                  <h2 style={{ fontFamily: "'Baloo 2', sans-serif", color: "#fff", fontSize: 26, margin: 0 }}>{lastResult.correct ? "Правильно!" : "Неправильно"}</h2>
+                  <p style={{ color: ACCENT, fontFamily: "'Baloo 2', sans-serif", fontWeight: 700, fontSize: 20, marginTop: 8 }}>+{lastResult.points} балів</p>
+                </>
+              ) : (
+                <div style={{ fontSize: 28 }} className="qa-fade">⏳</div>
+              )}
+              <p style={{ color: "#7A70A0", marginTop: 20, fontSize: 14 }}>Очікуємо на інших гравців…</p>
+            </div>
+          </Screen>
+        );
+      }
+
+      return (
+        <Screen>
+          <HeaderBar left={`Питання ${state.currentIndex + 1} / ${state.totalQuestions}`} right={playerName} />
+          <div className="qa-fade" key={state.currentIndex} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+            <TimerRing fraction={fraction} seconds={remaining} />
+            <h2 style={{ fontFamily: "'Baloo 2', sans-serif", color: "#fff", fontSize: 22, textAlign: "center", margin: "20px 0 26px", maxWidth: 520 }}>{q.text}</h2>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, width: "100%", maxWidth: 520 }}>
+              {q.options.map((opt, i) => (
+                <button key={i} className="qa-opt" disabled={remaining <= 0} onClick={() => answer(i)} style={{ background: OPTS[i].bg, border: "none", borderRadius: 14, padding: "22px 14px", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, cursor: "pointer", minHeight: 84 }}>
+                  <ShapeIcon shape={OPTS[i].shape} size={26} />
+                  <span style={{ color: "#fff", fontWeight: 700, fontSize: 16 }}>{opt}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </Screen>
+      );
+    }
+
+    if (state.status === "leaderboard") {
+      return (
+        <Screen>
+          <HeaderBar left={`Після питання ${state.currentIndex + 1}`} right={playerName} />
+          <Leaderboard players={players} highlightId={playerId} />
+          <p style={{ textAlign: "center", color: "#7A70A0", marginTop: 16, fontSize: 14 }}>Очікуємо наступне питання…</p>
+        </Screen>
+      );
+    }
+
+    if (state.status === "final") {
+      const top3 = players.slice(0, 3);
+      const myRank = players.findIndex(p => p.id === playerId) + 1;
+      return (
+        <Screen>
+          <div className="qa-fade" style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center" }}>
+            <div style={{ fontSize: 34 }}>🏆</div>
+            <h2 style={{ fontFamily: "'Baloo 2', sans-serif", color: "#fff", fontSize: 26, margin: "10px 0 4px" }}>Вікторину завершено!</h2>
+            {myRank > 0 && <p style={{ color: "#B9AFDA", marginBottom: 8, fontSize: 14 }}>Ваше місце: <b style={{ color: ACCENT }}>#{myRank}</b></p>}
+            <Podium top3={top3} />
+            <div style={{ width: "100%", maxWidth: 420, marginTop: 26 }}><Leaderboard players={players} highlightId={playerId} compact /></div>
+            <Button variant="ghost" onClick={resetAll} style={{ marginTop: 24 }}>Вийти</Button>
+          </div>
+        </Screen>
+      );
+    }
+  }
+
+  return <Screen><LoadingPane /></Screen>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
